@@ -50,17 +50,48 @@ GoPhantom 的工作流程分为两个主要阶段：**生成阶段**和**执行�
 
 **步骤**:
 
-1.  克隆本仓库到你的本地机器：
-    ```bash
-    git clone [https://github.com/hsad/GoPhantom.git](https://github.com/hsad/GoPhantom.git)
-    cd GoPhantom
-    ```
+1. 克隆本仓库到你的本地机器：
+   ```bash
+   git clone [https://github.com/hsad/GoPhantom.git](https://github.com/hsad/GoPhantom.git)
+   cd GoPhantom
+   ```
 
-2.  将你的原始 Shellcode (例如 `beacon.bin`) 和诱饵文件 (例如 `document.pdf`) 放入项目目录。
+2. 将你的原始 Shellcode (例如 `beacon.bin`) 和诱饵文件 (例如 `document.pdf`) 放入项目目录。
 
-3.  运行 `generator.go` 并指定所需参数来生成加载器。
+3. 运行 `generator.go` 并指定所需参数来生成加载器。
 
-**命令行使用示例:**
+## 命令行参数 (Command-line Flags)
+
+- `-decoy <file_path>`: **(必需)** 指定用作诱饵的文件的路径。
+- `-payload <file_path>`: **(必需)** 指定原始 x64 Shellcode 文件的路径。
+- `-out <file_name>`: **(可选)** 指定输出的可执行文件的名称。默认为 `FinalLoader.exe`。
+
+## 使用示例 (Usage Example)
+
+### 步骤 1: 生成加载器
+
+在攻击机上，我们准备一个作为荷载的 shellcode (calc_x64.bin，功能是弹出一个计算器) 和一个无害的诱饵文件 (info.txt)。然后运行生成器：
 
 ```bash
-go run generator.go -decoy "document.pdf" -payload "beacon.bin" -out "SafeRunner.exe"
+go run generator.go -decoy "info.txt" -payload "calc_x64.bin" -out "hello.exe"
+```
+
+生成器会显示带有你签名的 Logo，并完成编译过程，最终生成 hello.exe。
+
+![](image/img_1.png)
+
+### 步骤 2: 在目标机器执行
+
+将 hello.exe 发送给目标并在 Windows 11 环境下执行。
+
+程序会立刻打开诱饵文件 info.txt 来吸引用户的注意力，与此同时，作为核心荷载的计算器程序 (calc.exe) 已经在后台被成功唤起。
+
+![](image/img.png)
+
+## 免责声明 (Disclaimer)
+
+⚠️ **此工具仅限于授权的渗透测试、安全研究和教育目的。**
+
+严禁将此工具用于任何非法活动。本项目的作者 (**hsad**) 不对任何因滥用或非法使用此工具而导致的直接或间接后果承担任何责任。用户应对自己的所有行为负责。
+
+**使用本工具即表示您已阅读、理解并同意遵守此免责声明。**
