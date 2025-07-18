@@ -1,7 +1,3 @@
-// 文件名: generator.go
-//
-// GoFilePacker: 高级 Go 语言荷载加载器生成器 (最终版 - Fire and Forget)
-
 package main
 
 import (
