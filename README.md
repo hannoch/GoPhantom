@@ -52,7 +52,7 @@ GoPhantom 的工作流程分为两个主要阶段：**生成阶段**和**执行�
 
 1. 克隆本仓库到你的本地机器：
    ```bash
-   git clone [https://github.com/hsad/GoPhantom.git](https://github.com/hsad/GoPhantom.git)
+   git clone https://github.com/watanabe-hsad/GoPhantom.git
    cd GoPhantom
    ```
 
