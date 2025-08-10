@@ -1,6 +1,25 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
+# ===============================================
+# Project-specific files for GoPhantom
+# ===============================================
+
+# Final compiled loader
+FinalLoader.exe
+hello.exe
+
+# Example payload and decoy files
+# These should be provided by the user, not stored in the repo.
+beacon_x64.bin
+calc_x64.bin
+info.txt
+
+# JetBrains IDE directory
+.idea/
+
+# ===============================================
+# General Go community template
+# From: https://github.com/github/gitignore
+# ===============================================
+
 # Binaries for programs and plugins
 *.exe
 *.exe~
@@ -17,7 +36,7 @@ coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
+# Dependency directories
 # vendor/
 
 # Go workspace file
@@ -27,6 +46,5 @@ go.work.sum
 # env file
 .env
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# macOS specific files
+.DS_Store
