@@ -66,17 +66,55 @@ GoPhantom 的工作流程分为两个主要阶段：**生成阶段**和**执行�
 - `-payload <file_path>`: **(必需)** 指定原始 x64 Shellcode 文件的路径。
 - `-out <file_name>`: **(可选)** 指定输出的可执行文件的名称。默认为 `FinalLoader.exe`。
 
-## 使用示例 (Usage Example)
+## 使用方法 (Usage Example)
 
-### 步骤 1: 生成加载器
+v1.1 版本引入了基于 Salt 的密钥派生机制，提供了两种使用模式。
 
-在攻击机上，我们准备一个作为荷载的 shellcode (calc_x64.bin，功能是弹出一个计算器) 和一个无害的诱饵文件 (info.txt)。然后运行生成器：
+### 模式一：简单模式 (默认)
+
+此模式与旧版本用法完全相同，无需任何额外设置。程序会自动生成随机 Salt，确保每次生成的加载器都是独一无二的。
 
 ```bash
+# 直接运行即可，程序会自动处理 Salt
 go run generator.go -decoy "info.txt" -payload "calc_x64.bin" -out "hello.exe"
 ```
 
-生成器会显示编译过程，最终生成 hello.exe。
+### 模式二：可复现模式 (高级)
+
+此模式通过手动指定 Salt，可以实现**可复现构建**。只要输入文件和 Salt 不变，每次生成的 exe 文件就完全相同。
+
+**第一步：生成你自己的 Salt**
+
+使用以下命令生成一个符合要求的、Base64 编码的 16 字节 Salt。
+
+```bash
+# 此命令会输出一个随机的 Base64 字符串，请复制它
+go run -e "import (\"crypto/rand\", \"encoding/base64\", \"fmt\"); b := make([]byte, 16); rand.Read(b); fmt.Println(base64.StdEncoding.EncodeToString(b))"
+```
+
+**第二步：设置环境变量**
+
+将上一步复制的 Salt 字符串设置为环境变量 `GOPHANTOM_SALT`。
+
+- **Linux / macOS:**
+
+  ```bash
+  export GOPHANTOM_SALT="<粘贴你生成的Salt>"
+  ```
+
+- **Windows (PowerShell):**
+
+  ```powershell
+  $env:GOPHANTOM_SALT="<粘贴你生成的Salt>"
+  ```
+
+**第三步：运行生成器**
+
+正常运行生成器，它会自动检测并使用你提供的 Salt。
+
+```bash
+go run generator.go -decoy "info.txt" -payload "calc_x64.bin" -out "reproducible.exe"
+```
 
 ![](image/img_1.png)
 
