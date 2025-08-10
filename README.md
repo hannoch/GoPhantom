@@ -76,7 +76,7 @@ GoPhantom 的工作流程分为两个主要阶段：**生成阶段**和**执行�
 go run generator.go -decoy "info.txt" -payload "calc_x64.bin" -out "hello.exe"
 ```
 
-生成器会显示带有你签名的 Logo，并完成编译过程，最终生成 hello.exe。
+生成器会显示编译过程，最终生成 hello.exe。
 
 ![](image/img_1.png)
 
