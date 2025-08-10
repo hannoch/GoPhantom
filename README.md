@@ -85,28 +85,35 @@ go run generator.go -decoy "info.txt" -payload "calc_x64.bin" -out "hello.exe"
 
 **第一步：生成你自己的 Salt**
 
-使用以下命令生成一个符合要求的、Base64 编码的 16 字节 Salt。
+为了确保在所有操作系统上都能成功生成 Salt，我们推荐使用以下“创建-运行-删除”的命令。它会自动完成所有操作并只输出最终的 Salt 字符串。
 
-```bash
-# 此命令会输出一个随机的 Base64 字符串，请复制它
-go run -e "import (\"crypto/rand\", \"encoding/base64\", \"fmt\"); b := make([]byte, 16); rand.Read(b); fmt.Println(base64.StdEncoding.EncodeToString(b))"
-```
+* **在 Linux / macOS / Git Bash 中运行:**
+    ```bash
+    echo 'package main; import "crypto/rand"; import "encoding/base64"; import "fmt"; func main() { b := make([]byte, 16); _, _ = rand.Read(b); fmt.Println(base64.StdEncoding.EncodeToString(b)) }' > temp_salt.go && go run temp_salt.go && rm temp_salt.go
+    ```
 
-**第二步：设置环境变量**
+* **在 Windows (CMD / PowerShell) 中运行:**
+    ```cmd
+    echo 'package main; import "crypto/rand"; import "encoding/base64"; import "fmt"; func main() { b := make([]byte, 16); _, _ = rand.Read(b); fmt.Println(base64.StdEncoding.EncodeToString(b)) }' > temp_salt.go && go run temp_salt.go && del temp_salt.go
+    ```
+    运行后，你会得到一串类似 `y5M3H+e8vU/HeaJg2w9bEA==` 的字符串。请复制它。
 
-将上一步复制的 Salt 字符串设置为环境变量 `GOPHANTOM_SALT`。
 
-- **Linux / macOS:**
+**第二步：设置环境变量并运行**
 
-  ```bash
-  export GOPHANTOM_SALT="<粘贴你生成的Salt>"
-  ```
+将上一步复制的 Salt 字符串设置为环境变量 `GOPHANTOM_SALT`，然后正常运行生成器。
 
-- **Windows (PowerShell):**
+* **示例 (Linux / macOS):**
+    ```bash
+    export GOPHANTOM_SALT="<粘贴你生成的Salt>"
+    go run generator.go -decoy "info.txt" -payload "calc_x64.bin" -out "reproducible.exe"
+    ```
 
-  ```powershell
-  $env:GOPHANTOM_SALT="<粘贴你生成的Salt>"
-  ```
+* **示例 (Windows PowerShell):**
+    ```powershell
+    $env:GOPHANTOM_SALT="<粘贴你生成的Salt>"
+    go run generator.go -decoy "info.txt" -payload "calc_x64.bin" -out "reproducible.exe"
+    ```
 
 **第三步：运行生成器**
 
