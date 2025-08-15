@@ -6,6 +6,17 @@
 FinalLoader.exe
 hello.exe
 
+# Multi-platform binaries (should be distributed via Release page)
+GoPhantom-v*
+GoPhantom-v*.exe
+GoPhantom-v*-linux
+GoPhantom-v*-macos-*
+GoPhantom-v*-windows-*
+
+# Build scripts
+build.sh
+build.bat
+
 # Example payload and decoy files
 # These should be provided by the user, not stored in the repo.
 beacon_x64.bin
