@@ -34,11 +34,11 @@
 ./GoPhantom-v1.3 -decoy <诱饵文件> -payload <荷载文件> -out <输出文件> [选项]
 
 必需参数:
-  -decoy     诱饵文件路径 (PDF、图片、文档等)
   -payload   x64 shellcode文件路径  
   -out       输出可执行文件名
 
 可选参数:
+  -decoy     诱饵文件路径 (PDF、图片、文档等)
   -compress  启用数据压缩 (默认: true)
   -obfuscate 启用睡眠混淆
   -mutate    启用shellcode变异
