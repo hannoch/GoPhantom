@@ -47,7 +47,6 @@
 ./GoPhantom -decoy <诱饵文件> -payload <荷载文件> -out <输出文件> [选项]
 
 必需参数:
-  -decoy     诱饵文件路径 (PDF、图片、文档等)
   -payload   x64 shellcode文件路径  
   -out       输出可执行文件名
 
@@ -56,6 +55,8 @@
   -delay      延迟N秒后执行荷载 (默认: 0)
   -obfuscate  启用睡眠混淆
   -mutate     启用shellcode变异
+  -log        默认不生成日志
+  -decoy     诱饵文件路径 (PDF、图片、文档等)
 ```
 
 ### 使用示例
@@ -166,6 +167,7 @@ $env:GOPHANTOM_SALT="y5M3H+e8vU/HeaJg2w9bEA=="
 ### 环境要求
 * Go 1.19 或更高版本
 * 支持交叉编译到Windows平台
+* 如需在windows7上运行，Go 必须为Go 1.19(最后一个支持windows7的稳定版本)
 
 ### 快速开始
 
@@ -183,6 +185,8 @@ $env:GOPHANTOM_SALT="y5M3H+e8vU/HeaJg2w9bEA=="
    ```bash
    # 源码方式
    go run generator.go -decoy "info.txt" -payload "calc_x64.bin" -out "hello.exe"
+   # 不指定诱饵文件路径，默认会生成随机文件
+   go run generator.go -payload "calc_x64.bin" -out "hello.exe"
    
    # 二进制方式
    ./GoPhantom -decoy "info.txt" -payload "calc_x64.bin" -out "hello.exe"

